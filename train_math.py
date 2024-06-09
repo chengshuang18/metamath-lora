@@ -12,12 +12,12 @@
 #    See the License for the specific language governing permissions and
 #    limitations under the License.
 #    Modified by Zheng Yuan and Hongyi Yuan
-
+from __future__ import annotations
 import os
 import copy
 import logging
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Sequence
+from typing import Optional, Dict, Sequence, List, Union
 import io
 import torch
 import transformers
@@ -26,6 +26,13 @@ from transformers import Trainer
 import argparse
 import json
 import random;random.seed(42)
+
+from peft import (
+    LoraConfig,
+    PeftModel,
+    get_peft_model
+)
+from src.ascii_trainer import ASCIITrainer
 
 def _make_r_io_base(f, mode: str):
     if not isinstance(f, io.IOBase):
@@ -60,7 +67,27 @@ PROMPT_DICT = {
 @dataclass
 class ModelArguments:
     model_name_or_path: Optional[str] = field(default="facebook/opt-125m")
-
+    lora_r: Optional[int] = field(default=16)
+    lora_alpha: Optional[int] = field(default=32)
+    # target_modules: Optional[str] = field(
+    #     default="['q_proj', 'v_proj', 'k_proj', 'o_proj', 'gate_proj', 'down_proj', 'up_proj']",
+    #     metadata={
+    #         "help": "List of module names or regex expression of the module names to replace with Lora. "
+    #                 "For example, ['q', 'v'] or '.*decoder.*(SelfAttention|EncDecAttention).*(q|v)'"
+    #     },
+    # )
+    target_modules: Optional[Union[list[str], str]] = field(
+        default=None,
+        metadata={
+            "help": (
+                "List of module names or regex expression of the module names to replace with LoRA."
+                "For example, ['q', 'v'] or '.*decoder.*(SelfAttention|EncDecAttention).*(q|v)."
+                "This can also be a wildcard 'all-linear' which matches all linear/Conv1D layers except the output layer."
+                "If not specified, modules will be chosen according to the model architecture, If the architecture is "
+                "not known, an error will be raised -- in this case, you should specify the target modules manually."
+            ),
+        },
+    )
 
 @dataclass
 class DataArguments:
@@ -76,6 +103,10 @@ class TrainingArguments(transformers.TrainingArguments):
         metadata={"help": "Maximum sequence length. Sequences will be right padded (and possibly truncated)."},
     )
     overwrite_output_dir: bool = field(default=True)
+    method: Optional[str] = field(default="ASCII")
+    threshold: Optional[float] = field(default=0.5)
+    no_cluster: Optional[bool] = field(default=True)
+    n_cluster: Optional[int] = field(default=1024)
 
 
 def safe_save_model_for_hf_trainer(trainer: transformers.Trainer, output_dir: str):
@@ -277,13 +308,34 @@ def train():
                 "unk_token": DEFAULT_UNK_TOKEN,
             }
         )
+    ########## Lora setting ##########
+    target_modules = ['q_proj', 'v_proj', 'k_proj', 'o_proj', 'gate_proj', 'down_proj', 'up_proj']
+    lora_config = LoraConfig(
+        r=model_args.lora_r,
+        lora_alpha=model_args.lora_alpha,
+        target_modules=target_modules,
+        fan_in_fan_out=False,
+        lora_dropout=0.05,
+        inference_mode=False,
+        bias="none",
+        task_type="CAUSAL_LM",
+    )
+    model = get_peft_model(model, lora_config)
+    model.print_trainable_parameters()
 
     data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args)
-    trainer = Trainer(model=model, tokenizer=tokenizer, args=training_args, **data_module)
+    if training_args.method == "ASCII":
+        trainer = ASCIITrainer(model=model, tokenizer=tokenizer, args=training_args, **data_module)
+    elif training_args.method == "valinna":
+        trainer = Trainer(model=model, tokenizer=tokenizer, args=training_args, **data_module)
+    else:
+        raise ValueError("Invalid training method specified.")
     trainer.train()
     trainer.save_state()
     # if os.environ.get('LOCAL_RANK') == '0':
-    safe_save_model_for_hf_trainer(trainer=trainer, output_dir=training_args.output_dir)
+    # safe_save_model_for_hf_trainer(trainer=trainer, output_dir=training_args.output_dir)
+    # peft_model_id = training_args.output_dir + "/adapter"
+    # trainer.model.save_pretrained(peft_model_id)
 
 
 if __name__ == "__main__":

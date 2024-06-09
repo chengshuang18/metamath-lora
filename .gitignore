@@ -1,2 +1,7 @@
 .idea
 .gitignore
+.vscode
+__pycache__
+data/train/*
+output
+wandb
